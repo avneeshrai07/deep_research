@@ -1,13 +1,20 @@
-from prompts.shallow_prompt import shallow_prompt
+from prompts.intent_prompt_file import intent_prompt
+from processes.step0 import step0_function
+
+
 
 
 async def main_function(research_type: str, query: str):
 
-    #  shallow
-    research = []
+    #  research_documantation
+    research = {}
     
-    shallow_reasearch = await shallow_prompt(query)
-    research.append(shallow_reasearch)
+    user_intent = await intent_prompt(query)
+    research["user_intent"] = user_intent
+
+    research = await step0_function(research)
+
+    
     if research_type=="Shallow":
         return research
     
