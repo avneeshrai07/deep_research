@@ -10,7 +10,6 @@ import asyncio
 async def linkedin_post_extractor(
     target, research: dict
 ):
-
     name = target.get("name", "")
     attributes = target.get("attributes", {})
 
@@ -38,10 +37,8 @@ async def linkedin_post_extractor(
         user_id = extract_linkedin_username(user_linkedin)
         print("user_id", user_id)
 
-        # FIX 1: Offload blocking sync call to thread pool
         user_data, user_post = await asyncio.to_thread(get_all_posts, user_id)
         print("user_data in PersonColdEmail:   \n\n", user_data, "\n\n")
-
 
         if user_data is None:
             user_data = []
@@ -52,29 +49,40 @@ async def linkedin_post_extractor(
                 "cluster_posts": []
             }
 
-        # Filter out empty posts
-        valid_posts = [
+        # Only keep posts that have a non-empty title — ignore the rest
+        title_valid_posts = [
             post for post in user_post
-            if post.get('title', '').strip() or post.get('text', '').strip()
+            if post.get("title", "").strip()
         ]
 
-        print(f"Valid posts after filtering: {len(valid_posts)} out of {len(user_post)}")
+        print(f"Title-valid posts: {len(title_valid_posts)} out of {len(user_post)}")
 
-        if not valid_posts:
+        if not title_valid_posts:
             return {
-                "user_data": {},
+                "user_data": user_data,
                 "keyword_posts": [],
                 "cluster_posts": []
             }
 
-        # FIX 2: Removed unused `results = extractor.extract(valid_posts)` call
+        # Build title → full post lookup map
+        # If duplicate titles exist, last one wins (acceptable tradeoff)
+        title_to_post = {
+            post["title"].strip(): post
+            for post in title_valid_posts
+        }
+
+        # Only send title-only dicts to extractor
+        title_only_docs = [
+            {"title": title}
+            for title in title_to_post.keys()
+        ]
+
         extractor = MPNetExtractor(user_intent="user_post")
 
-        # FIX 3: Replaced deprecated get_event_loop().run_in_executor with asyncio.to_thread
-        keyword_posts, cluster_posts = await asyncio.gather(
+        keyword_title_docs, cluster_title_docs = await asyncio.gather(
             asyncio.to_thread(
                 extractor.extract_top_n,
-                valid_posts,
+                title_only_docs,
                 3,
                 0.3,
                 True,
@@ -83,7 +91,7 @@ async def linkedin_post_extractor(
             ),
             asyncio.to_thread(
                 extractor.extract_top_cluster,
-                valid_posts,
+                title_only_docs,
                 5,
                 True,
                 32,
@@ -93,14 +101,19 @@ async def linkedin_post_extractor(
             return_exceptions=True
         )
 
-        # Handle exceptions
-        if isinstance(keyword_posts, Exception):
-            print(f"Keyword extraction failed: {keyword_posts}")
-            keyword_posts = []
+        # Resolve matched title-only docs back to full posts
+        def resolve_full_posts(title_docs, lookup: dict) -> list:
+            if isinstance(title_docs, Exception):
+                print(f"❌ Extraction failed: {title_docs}")
+                return []
+            return [
+                lookup[d["title"]]
+                for d in title_docs
+                if d.get("title") in lookup
+            ]
 
-        if isinstance(cluster_posts, Exception):
-            print(f"Cluster extraction failed: {cluster_posts}")
-            cluster_posts = []
+        keyword_posts = resolve_full_posts(keyword_title_docs, title_to_post)
+        cluster_posts = resolve_full_posts(cluster_title_docs, title_to_post)
 
         print("keyword_posts (top 3):   \n\n", keyword_posts, "\n\n")
         print("cluster_posts (0-5):   \n\n", cluster_posts, "\n\n")
@@ -118,6 +131,7 @@ async def linkedin_post_extractor(
             "keyword_posts": [],
             "cluster_posts": []
         }
+
 
 
 async def web_search_function(
