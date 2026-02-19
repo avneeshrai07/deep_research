@@ -1,7 +1,7 @@
 from api.person_details import fetch_person_details
 from tools.tavily import tavily_web_search_function
 from helper.pattern_match import match_pattern
-from api.person_post import get_all_posts
+from api.company_post import get_all_company_posts
 from helper.extractor import extract_linkedin_username
 from helper.mpnet_keyword_extractor import MPNetExtractor
 import asyncio
@@ -19,25 +19,10 @@ async def linkedin_post_extractor(
     )
     print("basic_details:   ", basic_details)
 
-    # Fetch LinkedIn person details
-    try:
-        linkedin_person_details = await fetch_person_details(
-            user_name=name,
-            basic_details=basic_details
-        )
-    except Exception as e:
-        print(f"❌ fetch_person_details failed for '{name}': {str(e)}")
-        linkedin_person_details = {}
 
     try:
-        data = linkedin_person_details.get("data", {})
-        user_linkedin = data.get("profile_link", "")
-        print("user_linkedin:   ", user_linkedin)
 
-        user_id = extract_linkedin_username(user_linkedin)
-        print("user_id", user_id)
-
-        user_data, user_post = await asyncio.to_thread(get_all_posts, user_id)
+        user_data, user_post = await asyncio.to_thread(get_all_company_posts, name)
         print("user_data in PersonColdEmail:   \n\n", user_data, "\n\n")
 
         if user_data is None:
