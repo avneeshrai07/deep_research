@@ -7,6 +7,7 @@ async def step0_function(research: dict) -> dict:
 
     for single_target in targets:
         if single_target["type"] == "person" and single_target["priority"] == "primary":
-            research["person"] = await person_workflow_function(single_target)
+            person_workflow_data = await person_workflow_function(single_target, research)
+            research["research_data"].append(person_workflow_data)
 
     return research
