@@ -75,10 +75,10 @@ def get_all_posts(user_name):
         
         top_posts.append({
             "title": title,
-            # "author": author,
+            "author": author,
             "text": text,
-            # "share_url": share_url,
-            # "attachments": attachment_urls
+            "share_url": share_url,
+            "attachments": attachment_urls
         })
     return user_data, top_posts
 
