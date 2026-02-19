@@ -2,7 +2,7 @@ from prompts.intent_prompt_file import intent_prompt
 from processes.step0 import step0_function
 from processes.shallow_prompt import shallow_research_prompt
 from tools.tavily import tavily_web_search_function
-from processes.intermidiate_prompt import intermidiate_research_prompt
+from processes.intermidiate_prompt import intermediate_research_prompt
 
 
 
@@ -20,15 +20,14 @@ async def main_function(research_type: str, query: str):
     research = await step0_function(research)
 
     shallow_reasearch = await shallow_research_prompt(research=research)
-    return shallow_reasearch
+    remaining_primary_research_purpose = shallow_reasearch.get("remaining_primary_research_purpose",[])
+    remaining_secondary_research_purpose = shallow_reasearch.get("remaining_primary_research_purpose",[])
     search_queries = shallow_reasearch.get("search_queries",[])
     notes = shallow_reasearch.get("notes",[])
     print("search_queries:  ",search_queries)
     research["DeepResearch"].extend(notes)
-
-
     if research_type=="Shallow":
-        return research
+        return research["DeepResearch"]
     
 
     step_2_research_data = []
@@ -38,8 +37,14 @@ async def main_function(research_type: str, query: str):
         research["used_queries"].append(single_query)
 
 
-    intermidiate_reasearch = await intermidiate_research_prompt(research,step_2_research_data)
 
+    intermidiate_reasearch = await intermediate_research_prompt(research,step_2_research_data, remaining_primary_research_purpose, remaining_secondary_research_purpose, notes)
+    remaining_primary_research_purpose = intermidiate_reasearch.get("remaining_primary_research_purpose",[])
+    remaining_secondary_research_purpose = intermidiate_reasearch.get("remaining_primary_research_purpose",[])
+    search_queries = intermidiate_reasearch.get("search_queries",[])
+    notes = intermidiate_reasearch.get("notes",[])
+    print("search_queries:  ",search_queries)
+    research["DeepResearch"].extend(notes)
     if research_type=="Intermediate":
         return research["DeepResearch"]
     

@@ -40,7 +40,7 @@ async def tavily_web_search_function(query: str, tavily_api_keys: List[str] = TE
 
     if not clients:
         return {"error": "No valid Tavily API clients were initialized."}
-
+    
     for client in clients:
         try:
             response = await asyncio.to_thread(
