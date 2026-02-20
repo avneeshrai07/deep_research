@@ -50,7 +50,7 @@ class ResearchIntent(BaseModel):
         description="All research targets with their flexible attributes"
     )
     primary_research_purpose: str = Field(
-        description="DIRECT and EXPLICIT goal — exactly what the user asked for. MUST-HAVE during research. Concise but complete."
+        description="DIRECT and EXPLICIT goal — exactly what the user asked for. MUST-HAVE during research. Concise but complete. under 350 characters"
     )
     secondary_research_purpose: str = Field(
         description="COMPREHENSIVE and EXPLORATORY extension beyond the explicit ask. Cherry-on-top insights, contextual depth, comparisons, breakdowns, and related metrics that enrich the research but are not strictly required."

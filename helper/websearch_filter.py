@@ -15,6 +15,20 @@ async def filter_results(data: dict, keyword: str) -> list[dict]:
 
     return overall
 
+async def weak_filter_results(data: dict) -> list[dict]:
+    overall = []
+    results = data.get("results",[])
+    for item in results:
+        if item.get("score", 0) > 0.90:
+            overall.append({
+                "url":     item.get("url"),
+                "title":   item.get("title"),
+                "content": item.get("content"),
+                "score":   item.get("score"),
+            })
+
+    return overall
+
 
 
 async def update_completed_topics(

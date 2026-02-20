@@ -14,15 +14,16 @@ async def main_function(research_type: str, query: str):
     research = {}
     
     user_intent = await intent_prompt(query)
+    print("user_intent: ", user_intent)
     research["user_intent"] = user_intent
     research["used_queries"] = []
     research["research_data"] = []
     research["DeepResearch"] = []
     completed_topics = []
     research = await step0_function(research)
-
+    print("research step0:  ",research)
     shallow_reasearch = await shallow_research_prompt(research=research)
-
+    print("shallow_reasearch:   ",shallow_reasearch)
     remaining_primary_research_purpose = shallow_reasearch.get("remaining_primary_research_purpose",[])
     remaining_secondary_research_purpose = shallow_reasearch.get("remaining_primary_research_purpose",[])
     search_queries = shallow_reasearch.get("search_queries",[])

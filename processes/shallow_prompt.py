@@ -2,16 +2,20 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
+
 from llm.hiaku import claude_haiku
+
 
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from enum import Enum
 
 
+
 # ─────────────────────────────────────────────
 # ENUMS
 # ─────────────────────────────────────────────
+
 
 class CoverageStatus(str, Enum):
     FULFILLED   = "FULFILLED"
@@ -19,9 +23,11 @@ class CoverageStatus(str, Enum):
     UNFULFILLED = "UNFULFILLED"
 
 
+
 # ─────────────────────────────────────────────
 # OUTPUT MODELS
 # ─────────────────────────────────────────────
+
 
 class NoteItem(BaseModel):
     topic:       str           = Field(description="'<Entity> — <Dimension>' format. E.g. 'Zomato — FY2024 Revenue'. Never generic headings.")
@@ -98,46 +104,54 @@ class ResearchAnalysisOutput(BaseModel):
     )
 
     notes: List[NoteItem] = Field(
-        default=None,
+        default_factory=list,
         description=(
             "Populated when primary_status is FULFILLED or PARTIAL. "
             "Minimum 5 notes if FULFILLED, minimum 3 if PARTIAL. "
             "Each note covers exactly ONE distinct fact — never merge two facts. "
-            "Cover both primary and secondary purposes across the note set."
+            "Cover both primary and secondary purposes across the note set. "
+            "Empty list [] when primary_status is UNFULFILLED."
         )
     )
     search_queries: List[SearchQuery] = Field(
-        default=None,
+        default_factory=list,
         description=(
             "List of SearchQuery objects, each targeting one remaining gap. "
             "Populated when primary_status is UNFULFILLED or PARTIAL. "
             "PRIORITY: fill slots from remaining_primary gaps first. "
             "Use remaining_secondary gaps for slots ONLY after remaining_primary is exhausted. "
             "Each SearchQuery: type, name, primary_identifier (required), "
-            "secondary_identifier (only if needed), and 1 query string anchored to name + primary_identifier."
+            "secondary_identifier (only if needed), and 1 query string anchored to name + primary_identifier. "
+            "Empty list [] when both statuses are FULFILLED."
         ),
     )
+
 
 
 # ─────────────────────────────────────────────
 # PROMPT BUILDERS
 # ─────────────────────────────────────────────
 
+
 def build_system_prompt(num_queries: int) -> str:
     return f"""\
 You are a precision research analysis agent operating inside a multi-step research pipeline. \
 Your job has four sequential stages. Complete them in strict order.
 
+
 Every output feeds the next iteration of the pipeline. \
 Accuracy, specificity, and zero hallucination are non-negotiable.
+
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STAGE 1 — EXTRACT NOTES FROM COLLECTED DATA
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 Before scoring anything, read all of `collected_data` and extract every relevant fact \
 as a structured note. This is your evidence base for all subsequent stages.
+
 
 TOPIC FORMAT
   Pattern: "<Entity> — <Dimension>"
@@ -146,10 +160,12 @@ TOPIC FORMAT
   ✅ "Blinkit — Unit Economics"
   ❌ "Overview" | "Background" | "Summary" | "Key Facts" | "General Info"
 
+
 ONE NOTE = ONE FACT
   Never merge two distinct facts into a single note. Split them.
   ❌ WRONG: "Revenue grew 40% and the company hired a new CFO."
   ✅ RIGHT: Two separate notes — one for revenue growth, one for CFO hire.
+
 
 DESCRIPTION DENSITY — each description must contain ALL five:
   1. Core fact  (what happened / what is true)
@@ -159,6 +175,7 @@ DESCRIPTION DENSITY — each description must contain ALL five:
   5. Implication  (what this means for the research purpose)
   Length: 4–6 sentences. Every sentence must carry unique, non-redundant information.
 
+
   ✅ CORRECT:
     "Raised $120M Series C at a $1.4B valuation in March 2024, led by Sequoia, bringing total \
 funding to $210M — a 3× step-up from the $400M Series B valuation in 2022. The round was \
@@ -167,11 +184,14 @@ Competitors Razorpay and BharatPe raised at flat valuations in the same period, 
 meaningful outlier. The capital is earmarked for Southeast Asia expansion and LLM infrastructure, \
 directly relevant to assessing international growth readiness."
 
+
   ❌ WRONG (vague, no numbers, no names):
     "The company has been growing and has raised several rounds of funding."
 
+
   ❌ WRONG (two facts merged):
     "Revenue grew 40% and the company also hired a new CFO."
+
 
 SOURCE RULE
   `source` must be a URL extracted verbatim from `collected_data`.
@@ -179,26 +199,33 @@ SOURCE RULE
   If no direct URL exists for a note, set source = null.
 
 
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STAGE 2 — SCORE COVERAGE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 Using the notes you just extracted, score both purposes:
+
 
   FULFILLED    — Notes clearly and completely answer the purpose. No meaningful gaps.
   PARTIAL      — Notes partially answer but at least one significant gap remains.
   UNFULFILLED  — Notes contain no meaningful answer to the purpose.
 
+
 Score `primary_research_purpose` first.
 Score `secondary_research_purpose` independently after.
+
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STAGE 3 — IDENTIFY REMAINING GAPS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 After scoring, list every sub-question or fact within each purpose that is still unanswered \
 or only partially answered by the extracted notes.
+
 
 `remaining_primary_research_purpose`
   - List every primary sub-question not yet answered by the notes.
@@ -206,17 +233,21 @@ or only partially answered by the extracted notes.
   - Order by criticality: most important gap first.
   - Set to [] if primary_status = FULFILLED.
 
+
   ✅ CORRECT: "What is HUL's total supply chain capex for FY2024?"
   ❌ WRONG:   "Supply chain details" | "More information needed"
+
 
 `remaining_secondary_research_purpose`
   - Same rules applied to secondary purpose.
   - Set to [] if secondary_status = FULFILLED.
 
 
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STAGE 4 — GENERATE SEARCH QUERIES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 Generate exactly {num_queries} SearchQuery objects only when primary_status = PARTIAL or UNFULFILLED.
 Each SearchQuery targets one remaining gap and must contain:
@@ -233,6 +264,7 @@ Each SearchQuery targets one remaining gap and must contain:
   - `query`                — exactly 1 search string incorporating name + primary_identifier.
                              ZERO domain overlap with already_used_search_queries.
 
+
 PRIORITY — strictly enforced:
   1. Fill slots from remaining_primary gaps first — up to all {num_queries} if enough primary gaps exist.
   2. Use remaining_secondary gaps for leftover slots ONLY after remaining_primary is exhausted.
@@ -240,17 +272,20 @@ PRIORITY — strictly enforced:
   4. If combined remaining gaps < {num_queries}, generate angle variants per gap
      (different portal, filetype, geography, time period) to reach exactly {num_queries}.
 
+
 SLOT-FILL REFERENCE  (N = {num_queries})
   Primary gaps ≥ N   → all N slots from primary
   Primary gaps < N   → fill primary first, use secondary for remaining slots
   Primary gaps = 0   → all N slots from secondary
   Combined gaps < N  → cover each gap from multiple angles to reach N
 
+
 DOMAIN FRESHNESS RULE
   Each query string must target a domain with ZERO semantic overlap with `already_used_search_queries`.
   Before writing each query: "Does any already-used query touch this domain?"
     YES → different angle (portal, filetype, geography, time period, data type).
     NO  → proceed.
+
 
   ✅ CORRECT SearchQuery objects:
     {{
@@ -268,30 +303,54 @@ DOMAIN FRESHNESS RULE
       "query": "Hindustan Unilever annual report 2024 logistics capex filetype:pdf"
     }}
 
+
   ❌ WRONG (primary_identifier is vague / query reuses used domain):
     {{
       "type": "person",
       "name": "Priya Nair",
-      "primary_identifier": "unknown",       ← never use unknown
+      "primary_identifier": "unknown",
       "secondary_identifier": "HUL",
-      "query": "Priya Nair HUL LinkedIn"     ← LinkedIn already used
+      "query": "Priya Nair HUL LinkedIn"
     }}
 
-Set search_queries = null when both primary_status AND secondary_status = FULFILLED.
+
+Set search_queries = [] when both primary_status AND secondary_status = FULFILLED.
+
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EMPTY DATA HANDLING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+If collected_data is absent, null, or contains the string "NO DATA COLLECTED YET", you MUST:
+  - Set primary_status   = UNFULFILLED
+  - Set secondary_status = UNFULFILLED
+  - Set notes            = []            ← empty list, never omitted
+  - Set search_queries   = exactly {num_queries} SearchQuery objects derived from
+                           primary_research_purpose and secondary_research_purpose
+  - remaining_primary_research_purpose  = decompose primary_research_purpose
+                                          into concrete answerable sub-questions
+  - remaining_secondary_research_purpose = decompose secondary_research_purpose
+                                           into concrete answerable sub-questions
+
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT MODE DECISION TABLE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  PRIMARY = FULFILLED   →  notes only           (search_queries = null)
-  PRIMARY = PARTIAL     →  notes + queries      (both populated)
-  PRIMARY = UNFULFILLED →  queries only         (notes = null)
+
+  PRIMARY = FULFILLED   →  notes populated,  search_queries = []
+  PRIMARY = PARTIAL     →  notes populated,  search_queries populated
+  PRIMARY = UNFULFILLED →  notes = [],       search_queries populated
+
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ABSOLUTE CONSTRAINTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 1.  Complete all 4 stages in order: Extract → Score → Gaps → Queries.
 2.  Every note must be directly traceable to `collected_data`. Zero hallucination.
@@ -307,53 +366,73 @@ ABSOLUTE CONSTRAINTS
 12. One note = one fact. Never merge distinct facts.
 13. Every description must contain at least one specific number, date, or named entity.
 14. Always return exactly {num_queries} SearchQuery objects when queries are required — never fewer.
+15. notes must be [] (empty list) when primary_status = UNFULFILLED — never omitted.
+16. search_queries must be [] (empty list) when both statuses = FULFILLED — never omitted.
 """
 
 
 def build_user_prompt(research: dict, num_queries: int) -> str:
+    raw_data = research.get("research_data")
+    if not raw_data or (isinstance(raw_data, (list, dict)) and len(raw_data) == 0):
+        collected_data_block = "NO DATA COLLECTED YET. Treat all statuses as UNFULFILLED."
+    else:
+        collected_data_block = raw_data
+
     return f"""\
 Execute all 4 stages in order for the research data below.
+
 
 ────────────────────────────────────────
 PRIMARY RESEARCH PURPOSE
 ────────────────────────────────────────
 {research["user_intent"]["primary_research_purpose"]}
 
+
 ────────────────────────────────────────
 SECONDARY RESEARCH PURPOSE
 ────────────────────────────────────────
 {research["user_intent"]["secondary_research_purpose"]}
+
 
 ────────────────────────────────────────
 ALREADY USED SEARCH QUERIES
 ────────────────────────────────────────
 {research.get("used_queries", [])}
 
+
 ────────────────────────────────────────
 COLLECTED DATA
 ────────────────────────────────────────
-{research["research_data"]}
+{collected_data_block}
+
 
 ────────────────────────────────────────
 EXECUTION CHECKLIST — complete in order
 ────────────────────────────────────────
 
+
 STAGE 1 — EXTRACT NOTES
 [ ] Read all of collected_data
+[ ] If collected_data = "NO DATA COLLECTED YET" → skip to STAGE 2 with notes = []
 [ ] Extract every relevant fact as a separate note
 [ ] Each topic: "<Entity> — <Dimension>" — no generic headings
 [ ] Each description: 4–6 sentences with core fact + number + trend + comparison + implication
 [ ] Each source: verbatim URL or null — never a field path
 [ ] One note = one fact — no merging
 
+
 STAGE 2 — SCORE COVERAGE
 [ ] primary_status   scored: FULFILLED / PARTIAL / UNFULFILLED
 [ ] secondary_status scored: FULFILLED / PARTIAL / UNFULFILLED
+[ ] Both = UNFULFILLED when collected_data was empty
+
 
 STAGE 3 — IDENTIFY GAPS
 [ ] remaining_primary_research_purpose  — concrete answerable questions, ordered by criticality
 [ ] remaining_secondary_research_purpose — concrete answerable questions, ordered by criticality
 [ ] Both set to [] if their respective status = FULFILLED
+[ ] Decompose raw purpose strings into sub-questions when collected_data was empty
+
 
 STAGE 4 — GENERATE QUERIES (only if primary = PARTIAL or UNFULFILLED)
 [ ] Exactly {num_queries} SearchQuery objects
@@ -365,33 +444,35 @@ STAGE 4 — GENERATE QUERIES (only if primary = PARTIAL or UNFULFILLED)
 [ ] Use remaining_secondary for leftover slots ONLY after primary is exhausted
 [ ] If combined gaps < {num_queries}, generate angle variants to reach exactly {num_queries}
 [ ] Every query string has zero domain overlap with already_used_search_queries
-[ ] search_queries = null if both statuses = FULFILLED
+[ ] search_queries = [] if both statuses = FULFILLED
+[ ] notes = [] if primary_status = UNFULFILLED
 """
+
 
 
 # ─────────────────────────────────────────────
 # AGENT
 # ─────────────────────────────────────────────
 
+
 async def shallow_research_prompt(
     research: dict,
     num_queries: int = 2,
 ) -> ResearchAnalysisOutput:
-    try:
-        result = await claude_haiku(
-            system_prompt=build_system_prompt(num_queries),
-            user_prompt=build_user_prompt(research, num_queries),
-            user_context=None,
-            pydantic_model=ResearchAnalysisOutput,
-        )
-        return result
-    except Exception as e:
-        return {"error": f"Error in research analysis: {str(e)}"}
+    result = await claude_haiku(
+        system_prompt=build_system_prompt(num_queries),
+        user_prompt=build_user_prompt(research, num_queries),
+        user_context=None,
+        pydantic_model=ResearchAnalysisOutput,
+    )
+    return result
+
 
 
 # ─────────────────────────────────────────────
 # PRINT HELPER
 # ─────────────────────────────────────────────
+
 
 def print_analysis(output: ResearchAnalysisOutput):
     print("\n" + "=" * 70)
@@ -402,14 +483,17 @@ def print_analysis(output: ResearchAnalysisOutput):
     print(f"   Primary:   {output.primary_status.value}")
     print(f"   Secondary: {output.secondary_status.value}")
 
-    if output.remaining_primary_research_purpose:
-        print(f"\n🔴 REMAINING PRIMARY GAPS ({len(output.remaining_primary_research_purpose)}):")
-        for i, gap in enumerate(output.remaining_primary_research_purpose, 1):
+    gaps_p = output.remaining_primary_research_purpose or []
+    gaps_s = output.remaining_secondary_research_purpose or []
+
+    if gaps_p:
+        print(f"\n🔴 REMAINING PRIMARY GAPS ({len(gaps_p)}):")
+        for i, gap in enumerate(gaps_p, 1):
             print(f"   {i}. {gap}")
 
-    if output.remaining_secondary_research_purpose:
-        print(f"\n🟡 REMAINING SECONDARY GAPS ({len(output.remaining_secondary_research_purpose)}):")
-        for i, gap in enumerate(output.remaining_secondary_research_purpose, 1):
+    if gaps_s:
+        print(f"\n🟡 REMAINING SECONDARY GAPS ({len(gaps_s)}):")
+        for i, gap in enumerate(gaps_s, 1):
             print(f"   {i}. {gap}")
 
     if output.notes:
