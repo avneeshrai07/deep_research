@@ -97,7 +97,7 @@ class ResearchAnalysisOutput(BaseModel):
         )
     )
 
-    notes: Optional[List[NoteItem]] = Field(
+    notes: List[NoteItem] = Field(
         default=None,
         description=(
             "Populated when primary_status is FULFILLED or PARTIAL. "
@@ -106,7 +106,7 @@ class ResearchAnalysisOutput(BaseModel):
             "Cover both primary and secondary purposes across the note set."
         )
     )
-    search_queries: Optional[List[SearchQuery]] = Field(
+    search_queries: List[SearchQuery] = Field(
         default=None,
         description=(
             "List of SearchQuery objects, each targeting one remaining gap. "
