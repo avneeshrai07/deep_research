@@ -56,18 +56,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import traceback
+from typing import Literal
+
+VALID_RESEARCH_TYPES = {"Shallow", "Intermediate", "Deep"}
+
 @app.post("/deep-research")
-async def cold_email(request: Request):
+async def deep_research(request: Request):
     try:
         data = await request.json()
-        # Shallow, Intermediate, Deep
-        research_type = data.get('research_type', "Shallow")
-        query = data.get('query', None)
+
+        research_type = data.get("research_type", "Shallow")
+        if research_type not in VALID_RESEARCH_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid research_type '{research_type}'. Must be one of: {sorted(VALID_RESEARCH_TYPES)}"
+            )
+
+        query = data.get("query", None)
         if not query:
-            return HTTPException(status_code=500, detail="No User Query")
+            raise HTTPException(status_code=400, detail="No User Query")
+
         return await main_function(research_type=research_type, query=query)
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        tb = traceback.format_exc()
+        print(tb)
+        raise HTTPException(status_code=500, detail=f"{str(e)}\n\n{tb}")
+
 # ----------------------------
 # Local Run
 # ----------------------------

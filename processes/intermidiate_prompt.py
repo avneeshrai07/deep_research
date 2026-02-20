@@ -29,6 +29,48 @@ class NoteItem(BaseModel):
     source:      Optional[str] = Field(default=None, description="Direct URL from new_collected_data only. Never a field path. Null if no URL available.")
 
 
+class SearchQuery(BaseModel):
+    type: str = Field(
+        description="Entity type: person, company, product, place, event, concept, sports, statistics, route, etc."
+    )
+    name: str = Field(
+        description="Full canonical name of the entity exactly as it appears on the web."
+    )
+    primary_identifier: str = Field(
+        description=(
+            "The single most identifying attribute that distinguishes this entity from all others "
+            "with the same name. Pick the ONE fact that eliminates ambiguity on the web.\n"
+            "Examples by type:\n"
+            "  person  → current employer or last known role  ('CEO, Hindustan Unilever')\n"
+            "  company → industry + country                   ('FMCG, India')\n"
+            "  product → parent company or category           ('Unilever, soap')\n"
+            "  place   → state/country                        ('Maharashtra, India')\n"
+            "  event   → year + organizer                     ('2024, ICC')\n"
+            "Never use vague values like 'unknown', 'N/A', or research directives."
+        )
+    )
+    secondary_identifier: Optional[str] = Field(
+        default=None,
+        description=(
+            "A second grounding fact — only include if primary_identifier alone is still ambiguous. "
+            "Leave null if primary is sufficient. Null is better than a weak second identifier.\n"
+            "Examples:\n"
+            "  person  → city or alma mater  ('Mumbai' / 'IIT Bombay')\n"
+            "  company → founding year or HQ ('1933' / 'Mumbai')\n"
+            "  product → product line        ('Dove Beauty Bar')\n"
+            "  place   → district or region  ('Konkan coast')\n"
+            "Never populate just to add detail."
+        )
+    )
+    query: str = Field(
+        description=(
+            "Exactly 1 web search query string targeting a gap domain. "
+            "Must incorporate name + primary_identifier to stay anchored. "
+            "ZERO domain overlap with already_used_search_queries."
+        )
+    )
+
+
 class ResearchAnalysisOutput(BaseModel):
     primary_status:   CoverageStatus = Field(
         description="Coverage of remaining_primary_research_purpose by new_collected_data only."
@@ -56,37 +98,36 @@ class ResearchAnalysisOutput(BaseModel):
         )
     )
 
-    notes: Optional[List[NoteItem]] = Field(
+    notes: List[NoteItem] = Field(
         default=None,
         description=(
             "Notes extracted ONLY from new_collected_data that answer items in "
             "remaining_primary or remaining_secondary lists. "
-            "Do NOT re-extract facts already covered in already_formatted_notes. "
+            "Do NOT re-extract facts already covered in already_completed_topics. "
             "Minimum 3 notes if PARTIAL, minimum 5 if FULFILLED. "
             "One note = one fact. Never merge two distinct facts."
         )
     )
-    search_queries: Optional[List[str]] = Field(
+    search_queries: List[SearchQuery] = Field(
         default=None,
         description=(
-            "Exactly 5 web search queries derived from still-remaining gaps. "
+            "List of SearchQuery objects, each targeting one still-remaining gap. "
             "Populated when primary_status is UNFULFILLED or PARTIAL. "
-            "PRIORITY: fill all 5 slots from remaining_primary gaps if 5+ primary gaps exist. "
+            "PRIORITY: fill slots from remaining_primary gaps first. "
             "Use remaining_secondary gaps for slots ONLY after remaining_primary is exhausted. "
-            "If remaining_primary has fewer than 5 gaps, fill leftover slots from remaining_secondary. "
-            "If combined gaps < 5, generate angle variants per gap (portal, filetype, geography, time period). "
-            "Zero domain overlap with already_used_search_queries."
+            "Each SearchQuery: type, name, primary_identifier (required), "
+            "secondary_identifier (null if not needed), and 1 query string "
+            "anchored to name + primary_identifier with ZERO domain overlap with already_used_search_queries."
         ),
-        min_length=5,
-        max_length=5
     )
 
 
 # ─────────────────────────────────────────────
-# PROMPTS
+# PROMPT BUILDERS
 # ─────────────────────────────────────────────
 
-INTERMEDIATE_SYSTEM_PROMPT = """\
+def build_intermediate_system_prompt(num_queries: int) -> str:
+    return f"""\
 You are a gap-filling research analysis agent operating inside a multi-step research pipeline.
 
 A previous step already extracted notes from an initial data batch and identified specific \
@@ -96,7 +137,7 @@ extract new notes that fill those gaps, re-score coverage, update the remaining 
 and generate new search queries for anything still unresolved.
 
 You do NOT re-analyze the original research purposes from scratch. \
-You do NOT re-extract facts already present in already_formatted_notes. \
+You do NOT re-extract facts already present in already_completed_topics. \
 You only work with: new_collected_data → remaining gap lists.
 
 
@@ -108,7 +149,7 @@ Read `new_collected_data` and extract every fact that answers any item in \
 `remaining_primary_research_purpose` or `remaining_secondary_research_purpose`.
 
 Strict scope: Only extract facts relevant to the remaining gap questions. \
-Do not extract facts already present in `already_formatted_notes`. \
+Do not extract facts already present in `already_completed_topics`. \
 Do not extract tangentially related facts that don't address a gap.
 
 TOPIC FORMAT
@@ -187,23 +228,36 @@ Only carry forward or remove — do not invent.
 STAGE 4 — GENERATE SEARCH QUERIES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Generate exactly 5 queries only when primary_status = PARTIAL or UNFULFILLED.
+Generate exactly {num_queries} SearchQuery objects only when primary_status = PARTIAL or UNFULFILLED.
+Each SearchQuery targets one remaining gap and must contain:
+  - `type`                 — entity type (person, company, product, place, event, etc.)
+  - `name`                 — full canonical name as it appears on the web
+  - `primary_identifier`   — the ONE fact that eliminates ambiguity for this entity on the web
+                             person  → current employer/role  ('CEO, Hindustan Unilever')
+                             company → industry + country     ('FMCG, India')
+                             product → parent company/category ('Unilever, soap')
+                             place   → state/country          ('Maharashtra, India')
+                             event   → year + organizer       ('2024, ICC')
+  - `secondary_identifier` — second grounding fact ONLY if primary alone is still ambiguous.
+                             Set to null if primary is sufficient. Null > weak second identifier.
+  - `query`                — exactly 1 search string incorporating name + primary_identifier.
+                             ZERO domain overlap with already_used_search_queries.
+
 Derive queries directly from the still-remaining gaps after Stage 3.
 
 PRIORITY — strictly enforced:
-  1. Fill query slots from remaining_primary gaps first — up to all 5 if enough gaps exist.
+  1. Fill query slots from remaining_primary gaps first — up to all {num_queries} if enough gaps exist.
   2. Once remaining_primary is exhausted, fill leftover slots from remaining_secondary.
   3. Never generate a secondary-gap query while a primary gap is still unresolved.
-  4. If combined remaining gaps < 5, generate angle variants per gap item using
-     different domains (portal, filetype, geography, time period) to reach exactly 5
+  4. If combined remaining gaps < {num_queries}, generate angle variants per gap item using
+     different domains (portal, filetype, geography, time period) to reach exactly {num_queries}
      without domain overlap with already_used_search_queries.
 
-SLOT-FILL REFERENCE TABLE
-  Primary gaps ≥ 5          → all 5 from primary
-  Primary = 3, Secondary ≥ 2 → 3 from primary + 2 from secondary
-  Primary = 3, Secondary = 1 → 3 from primary + 1 from secondary + 1 angle variant
-  Primary = 0, Secondary ≥ 5 → all 5 from secondary
-  Primary = 0, Secondary < 5 → all secondary + angle variants to reach 5
+SLOT-FILL REFERENCE  (N = {num_queries})
+  Primary gaps ≥ N   → all N slots from primary
+  Primary gaps < N   → fill primary first, use secondary for remaining slots
+  Primary gaps = 0   → all N slots from secondary
+  Combined gaps < N  → cover each gap from multiple angles to reach N
 
 DOMAIN FRESHNESS RULE
   Every query must target a domain with ZERO semantic overlap with `already_used_search_queries`.
@@ -211,20 +265,30 @@ DOMAIN FRESHNESS RULE
     YES → different angle (different portal, filetype, geography, time period, data type).
     NO  → proceed.
 
-  ✅ CORRECT (5 queries, primary-first, all different domains):
-    [
-      "HUL supply chain vendor contracts procurement GeM CPPP portal 2024",
-      "Hindustan Unilever cold chain expansion Tier-2 cities FY2024 filetype:pdf",
-      "HUL logistics automation warehouse Maharashtra UP annual report",
-      "Hindustan Unilever distribution capex investor presentation 2024 site:hul.co.in",
-      "HUL supply chain technology RFP tender 2024 site:eprocure.gov.in"
-    ]
+  ✅ CORRECT ({num_queries} SearchQuery objects, primary-first, all different domains):
+    {{
+      "type": "company",
+      "name": "Hindustan Unilever",
+      "primary_identifier": "FMCG, India",
+      "secondary_identifier": null,
+      "query": "Hindustan Unilever FMCG India supply chain vendor contracts GeM portal 2024"
+    }},
+    {{
+      "type": "company",
+      "name": "Hindustan Unilever",
+      "primary_identifier": "FMCG, India",
+      "secondary_identifier": "Mumbai HQ",
+      "query": "Hindustan Unilever cold chain Tier-2 cities FY2024 filetype:pdf"
+    }}
 
-  ❌ WRONG (fewer than 5, reusing same domain):
-    [
-      "HUL supply chain LinkedIn",
-      "Priya Nair HUL news 2024"
-    ]
+  ❌ WRONG (vague primary_identifier, reuses used domain, fewer than {num_queries}):
+    {{
+      "type": "company",
+      "name": "HUL",
+      "primary_identifier": "unknown",       ← never use unknown
+      "secondary_identifier": null,
+      "query": "HUL supply chain LinkedIn"   ← LinkedIn already used
+    }}
 
 Set search_queries = null when both statuses = FULFILLED.
 
@@ -244,16 +308,19 @@ ABSOLUTE CONSTRAINTS
 
 1.  Complete all 4 stages in strict order: Extract → Score → Update Gaps → Queries.
 2.  Only extract facts from new_collected_data. Never hallucinate.
-3.  Never re-extract facts already present in already_formatted_notes.
+3.  Never re-extract facts already present in already_completed_topics.
 4.  Remaining gap lists: only remove answered items — never add new gap questions.
 5.  source must be a verbatim URL from new_collected_data, or null. Never a field path.
 6.  Search queries derived from remaining gaps only — primary gaps have absolute priority.
 7.  Never generate a secondary-gap query while primary gaps remain unresolved.
-8.  search_queries must have zero domain overlap with already_used_search_queries.
-9.  Minimum notes: 5 if FULFILLED, 3 if PARTIAL. Produce maximum notes data supports.
-10. One note = one fact. Never merge distinct facts.
-11. Every description must contain at least one specific number, date, or named entity.
-12. Always return exactly 5 search_queries when queries are required — never fewer.
+8.  Each SearchQuery.query must have zero domain overlap with already_used_search_queries.
+9.  SearchQuery.primary_identifier must be a known confident fact — never 'unknown' or 'N/A'.
+10. SearchQuery.secondary_identifier must be null unless primary alone is genuinely ambiguous.
+11. SearchQuery.query must incorporate name + primary_identifier.
+12. Minimum notes: 5 if FULFILLED, 3 if PARTIAL. Produce maximum notes data supports.
+13. One note = one fact. Never merge distinct facts.
+14. Every description must contain at least one specific number, date, or named entity.
+15. Always return exactly {num_queries} SearchQuery objects when queries are required — never fewer.
 """
 
 
@@ -262,7 +329,8 @@ def build_intermediate_user_prompt(
     new_research_data: list,
     remaining_primary: list,
     remaining_secondary: list,
-    already_formatted_notes: list,
+    already_completed_topics: list,
+    num_queries: int,
 ) -> str:
     return f"""\
 Execute all 4 stages in strict order for the data below.
@@ -283,9 +351,9 @@ ALREADY USED SEARCH QUERIES
 {research.get("used_queries", [])}
 
 ────────────────────────────────────────
-ALREADY FORMATTED NOTES  (do NOT re-extract these facts)
+ALREADY COMPLETED TOPICS  (do NOT re-extract these topics)
 ────────────────────────────────────────
-{already_formatted_notes}
+{already_completed_topics}
 
 ────────────────────────────────────────
 NEW COLLECTED DATA  (extract notes only from this)
@@ -299,7 +367,7 @@ EXECUTION CHECKLIST — complete in strict order
 STAGE 1 — EXTRACT NOTES FROM NEW DATA
 [ ] Read new_collected_data fully
 [ ] Extract only facts that answer items in remaining_primary or remaining_secondary
-[ ] Skip any fact already present in already_formatted_notes
+[ ] Skip any fact already present in already_completed_topics
 [ ] Each topic: "<Entity> — <Dimension>" — no generic headings
 [ ] Each description: 4–6 sentences with core fact + number + trend + comparison + implication
 [ ] Each source: verbatim URL from new_collected_data, or null — never a field path
@@ -316,11 +384,15 @@ STAGE 3 — UPDATE REMAINING GAP LISTS
 [ ] Do NOT add new gap questions not in input lists
 
 STAGE 4 — GENERATE QUERIES (only if primary = PARTIAL or UNFULFILLED)
-[ ] Exactly 5 queries derived from still-remaining gaps
-[ ] Fill all 5 slots from remaining_primary first
-[ ] Use remaining_secondary for leftover slots only after primary is exhausted
-[ ] If combined gaps < 5, generate angle variants (portal, filetype, geography, time period) to reach 5
-[ ] Every query has zero domain overlap with already_used_search_queries
+[ ] Exactly {num_queries} SearchQuery objects
+[ ] Each has: type, name, primary_identifier (confident fact only), secondary_identifier (null if not needed), query
+[ ] primary_identifier must be a known confident fact — never 'unknown' or 'N/A'
+[ ] secondary_identifier = null unless primary alone is genuinely ambiguous
+[ ] query incorporates name + primary_identifier
+[ ] Fill all {num_queries} slots from remaining_primary first
+[ ] Use remaining_secondary for leftover slots ONLY after primary is exhausted
+[ ] If combined gaps < {num_queries}, generate angle variants (portal, filetype, geography, time period) to reach {num_queries}
+[ ] Every query string has zero domain overlap with already_used_search_queries
 [ ] search_queries = null if both statuses = FULFILLED
 """
 
@@ -334,24 +406,28 @@ async def intermediate_research_prompt(
     new_research_data: list,
     remaining_primary_research_purpose: list,
     remaining_secondary_research_purpose: list,
-    already_formatted_notes: list,
+    already_completed_topics: list,
+    num_queries: int = 5,
 ) -> ResearchAnalysisOutput:
-    try:
-        result = await claude_haiku(
-            system_prompt=INTERMEDIATE_SYSTEM_PROMPT,
-            user_prompt=build_intermediate_user_prompt(
-                research=research,
-                new_research_data=new_research_data,
-                remaining_primary=remaining_primary_research_purpose,
-                remaining_secondary=remaining_secondary_research_purpose,
-                already_formatted_notes=already_formatted_notes,
-            ),
-            user_context=None,
-            pydantic_model=ResearchAnalysisOutput,
-        )
-        return result
-    except Exception as e:
-        return {"error": f"Error in intermediate research analysis: {str(e)}"}
+    result = await claude_haiku(
+        system_prompt=build_intermediate_system_prompt(num_queries),
+        user_prompt=build_intermediate_user_prompt(
+            research=research,
+            new_research_data=new_research_data,
+            remaining_primary=remaining_primary_research_purpose,
+            remaining_secondary=remaining_secondary_research_purpose,
+            already_completed_topics=already_completed_topics,
+            num_queries=num_queries,
+        ),
+        user_context=None,
+        pydantic_model=ResearchAnalysisOutput,
+    )
+
+    if result is None:
+        raise ValueError("intermediate_research_prompt: claude_haiku returned None")
+
+    return result
+
 
 
 # ─────────────────────────────────────────────
@@ -384,8 +460,11 @@ def print_analysis(output: ResearchAnalysisOutput):
             print(f"\n   {i}. [{note.topic}]\n     {note.description}{src}")
 
     if output.search_queries:
-        print(f"\n🔍 NEXT SEARCH QUERIES (targeting still-remaining gaps):")
-        for i, q in enumerate(output.search_queries, 1):
-            print(f"   {i}. {q}")
+        print(f"\n🔍 NEXT SEARCH QUERIES ({len(output.search_queries)} targeting still-remaining gaps):")
+        for i, sq in enumerate(output.search_queries, 1):
+            sec = f" / {sq.secondary_identifier}" if sq.secondary_identifier else ""
+            print(f"\n   {i}. [{sq.type.upper()}] {sq.name}")
+            print(f"      id    : {sq.primary_identifier}{sec}")
+            print(f"      query : {sq.query}")
 
     print("\n" + "=" * 70)
