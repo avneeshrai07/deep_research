@@ -64,6 +64,22 @@ from typing import Literal
 
 VALID_RESEARCH_TYPES = {"Shallow", "Intermediate", "Deep"}
 
+@app.get("/")
+async def home():
+    try:
+        
+
+        return "hello, the deep research is live"
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(tb)
+        raise HTTPException(status_code=500, detail=f"{str(e)}\n\n{tb}")
+
+
+
 @app.post("/deep-research")
 async def deep_research(request: Request):
     try:
