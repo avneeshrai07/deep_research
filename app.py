@@ -1,4 +1,7 @@
 # app.py
+
+from boss_env import load_aws_secrets
+load_aws_secrets()
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
