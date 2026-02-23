@@ -4,6 +4,23 @@ from typing import List, Dict
 from sklearn.cluster import DBSCAN
 import numpy as np
 from helper.mpnet_helper import mpnet_helper_dict
+import threading
+
+
+# -------------------- Singleton Model --------------------
+
+_model_lock = threading.Lock()
+_model_cache: dict = {}
+
+def _get_model(model_name: str, device: str = None) -> SentenceTransformer:
+    key = (model_name, device)
+    if key not in _model_cache:
+        with _model_lock:
+            if key not in _model_cache:
+                print(f"🔄 Loading model '{model_name}' (once)...")
+                _model_cache[key] = SentenceTransformer(model_name, device=device)
+                print(f"✅ Model '{model_name}' loaded and cached.")
+    return _model_cache[key]
 
 
 # -------------------- Main Extractor --------------------
@@ -17,13 +34,15 @@ class MPNetExtractor:
         high_priority_weight: float = 2.0,
         device: str = None
     ):
+        # ✅ Singleton model — loaded once, reused across all instances/requests
         try:
-            self.model = SentenceTransformer(model_name, device=device)
+            self.model = _get_model(model_name, device)
         except Exception as e:
             raise RuntimeError(f"❌ Failed to load SentenceTransformer model '{model_name}': {e}")
 
         self.high_weight = high_priority_weight
 
+        # ✅ Keywords are per-request — recomputed each time (tiny cost)
         try:
             intent_config = mpnet_helper_dict[user_intent]
             self.high_priority = intent_config["high_priority_keywords"]
@@ -99,18 +118,14 @@ class MPNetExtractor:
             if self.exclude_emb is None:
                 return documents, doc_embeddings
 
-            keep_indices = []
-            for i, doc in enumerate(documents):
-                try:
-                    exclude_sims = util.cos_sim(doc_embeddings[i], self.exclude_emb)[0]
-                    if torch.max(exclude_sims).item() < exclusion_threshold:
-                        keep_indices.append(i)
-                except Exception as e:
-                    print(f"❌ Failed to compute exclusion similarity for doc index {i}: {e}")
-                    keep_indices.append(i)  # keep on error to avoid silent data loss
+            # ✅ Batched cosine similarity — no per-doc loop, no semaphore risk
+            all_sims = util.cos_sim(doc_embeddings, self.exclude_emb)  # [n_docs, n_exclude]
+            max_sims = all_sims.max(dim=1).values                       # [n_docs]
+            keep_mask = max_sims < exclusion_threshold
+            keep_indices = torch.where(keep_mask)[0]                    # ✅ proper tensor indices
 
-            filtered_docs = [documents[i] for i in keep_indices]
-            filtered_emb = doc_embeddings[keep_indices]
+            filtered_docs = [documents[i] for i in keep_indices.tolist()]
+            filtered_emb = doc_embeddings[keep_indices]                 # ✅ safe tensor indexing
 
             removed = len(documents) - len(filtered_docs)
             if removed > 0:
@@ -132,36 +147,32 @@ class MPNetExtractor:
     ) -> List[Dict]:
         """Score documents against high_priority embeddings and return top N."""
         try:
-            scored = []
-            for i, doc in enumerate(documents):
-                try:
-                    high_sims = util.cos_sim(doc_embeddings[i], self.high_priority_emb)[0]
-                    score = torch.max(high_sims).item() * self.high_weight
-                    print(f"📊 Doc {i} score: {score:.4f} | title: {doc.get('title', '')[:60]}")
-                    if score >= min_score:
-                        scored.append((score, doc))
-                except Exception as e:
-                    print(f"❌ Scoring failed for doc index {i}: {e}")
-                    continue
+            if self.high_priority_emb is None:
+                return documents[:top_n]
 
-            print(f"📊 Scoring complete: {len(scored)} docs passed min_score={min_score} out of {len(documents)}")
-            scored.sort(key=lambda x: x[0], reverse=True)
+            # ✅ Batched scoring — no per-doc loop
+            all_sims = util.cos_sim(doc_embeddings, self.high_priority_emb)  # [n_docs, n_keywords]
+            max_sims = all_sims.max(dim=1).values * self.high_weight          # [n_docs]
 
-            # Fallback: if nothing passes min_score, return top N by raw score anyway
-            if not scored:
+            for i, (score, doc) in enumerate(zip(max_sims.tolist(), documents)):
+                print(f"📊 Doc {i} score: {score:.4f} | title: {doc.get('title', '')[:60]}")
+
+            passed_mask = max_sims >= min_score
+            passed_indices = torch.where(passed_mask)[0]
+
+            # ✅ Fallback reuses existing scores — no redundant re-encoding
+            if len(passed_indices) == 0:
                 print(f"⚠️ No docs passed min_score={min_score} — returning top N by raw score.")
-                all_scored = []
-                for i, doc in enumerate(documents):
-                    try:
-                        high_sims = util.cos_sim(doc_embeddings[i], self.high_priority_emb)[0]
-                        score = torch.max(high_sims).item() * self.high_weight
-                        all_scored.append((score, doc))
-                    except Exception:
-                        continue
-                all_scored.sort(key=lambda x: x[0], reverse=True)
-                return [doc for _, doc in all_scored[:top_n]]
+                sorted_indices = torch.argsort(max_sims, descending=True)
+                return [documents[i] for i in sorted_indices[:top_n].tolist()]
 
-            return [doc for _, doc in scored[:top_n]]
+            print(f"📊 Scoring complete: {len(passed_indices)} docs passed min_score={min_score} out of {len(documents)}")
+
+            passed_scores = max_sims[passed_indices]
+            sorted_order = torch.argsort(passed_scores, descending=True)
+            final_indices = passed_indices[sorted_order][:top_n].tolist()
+
+            return [documents[i] for i in final_indices]
 
         except Exception as e:
             print(f"❌ _score_and_rank failed: {e}")
@@ -192,15 +203,13 @@ class MPNetExtractor:
                 doc_embeddings = self._encode_documents(documents, batch_size)
             except Exception as e:
                 print(f"❌ extract() failed at document encoding: {e}")
-                return documents[:top_n]  # fallback to top N as-is
+                return documents[:top_n]
 
-            # ── MODE 1: Only exclude keywords → filter out excluded, return top N ──
+            # ── MODE 1: Only exclude keywords → filter and return top N ──
             if self.high_priority_emb is None:
                 print("ℹ️ No high_priority keywords — filtering excluded docs and returning top N.")
                 try:
-                    documents, _ = self._filter_excluded(
-                        documents, doc_embeddings, exclusion_threshold
-                    )
+                    documents, _ = self._filter_excluded(documents, doc_embeddings, exclusion_threshold)
                 except Exception as e:
                     print(f"❌ extract() failed at exclusion filtering (mode 1): {e}")
                 return documents[:top_n]
@@ -230,15 +239,17 @@ class MPNetExtractor:
 
                     unique_labels = labels[labels != -1]
                     if len(unique_labels) == 0:
-                        print("⚠️ DBSCAN found no clusters (all points are noise) — falling back to score mode.")
+                        print("⚠️ DBSCAN found no clusters (all noise) — falling back to score mode.")
                         return self._score_and_rank(documents, doc_embeddings, top_n, min_score)
 
                     unique_clusters, counts = np.unique(unique_labels, return_counts=True)
                     largest_label = unique_clusters[np.argmax(counts)]
                     cluster_indices = np.where(labels == largest_label)[0]
 
-                    num_to_return = min(len(cluster_indices), top_n)
-                    return [documents[i] for i in cluster_indices[:num_to_return]]
+                    # ✅ Score within cluster against high_priority — not raw order
+                    cluster_docs = [documents[i] for i in cluster_indices]
+                    cluster_embs = doc_embeddings[torch.tensor(cluster_indices, dtype=torch.long)]
+                    return self._score_and_rank(cluster_docs, cluster_embs, top_n, min_score=0.0)
 
                 except Exception as e:
                     print(f"❌ extract() failed during clustering — falling back to score mode: {e}")
@@ -261,14 +272,22 @@ class MPNetExtractor:
         use_exclusion: bool = True,
         batch_size: int = 32
     ) -> List[Dict]:
+        # ✅ All params now wired through to extract()
         try:
-            return self.extract(
+            original_exclude_emb = self.exclude_emb
+            if not use_exclusion:
+                self.exclude_emb = None
+
+            result = self.extract(
                 documents=documents,
                 top_n=top_n,
                 min_score=min_score,
                 batch_size=batch_size,
-                cluster=False,
+                cluster=cluster,
             )
+
+            self.exclude_emb = original_exclude_emb  # restore after call
+            return result
         except Exception as e:
             print(f"❌ extract_top_n failed: {e}")
             return []
@@ -283,8 +302,13 @@ class MPNetExtractor:
         cluster_eps: float = 0.3,
         cluster_min_samples: int = 3
     ) -> List[Dict]:
+        # ✅ use_exclusion now respected
         try:
-            return self.extract(
+            original_exclude_emb = self.exclude_emb
+            if not use_exclusion:
+                self.exclude_emb = None
+
+            result = self.extract(
                 documents=documents,
                 top_n=top_n,
                 batch_size=batch_size,
@@ -292,6 +316,9 @@ class MPNetExtractor:
                 cluster_eps=cluster_eps,
                 cluster_min_samples=cluster_min_samples,
             )
+
+            self.exclude_emb = original_exclude_emb  # restore after call
+            return result
         except Exception as e:
             print(f"❌ extract_top_cluster failed: {e}")
             return []
