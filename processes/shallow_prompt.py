@@ -106,11 +106,12 @@ class ResearchAnalysisOutput(BaseModel):
     notes: List[NoteItem] = Field(
         default_factory=list,
         description=(
-            "Populated when primary_status is FULFILLED or PARTIAL. "
-            "Minimum 5 notes if FULFILLED, minimum 3 if PARTIAL. "
+            "Populated whenever the agent is confident about a fact, "
+            "regardless of primary_status or secondary_status. "
             "Each note covers exactly ONE distinct fact — never merge two facts. "
             "Cover both primary and secondary purposes across the note set. "
-            "Empty list [] when primary_status is UNFULFILLED."
+            "Minimum 5 notes if primary_status is FULFILLED, "
+            "minimum 3 if PARTIAL, and as many as confidently known if UNFULFILLED."
         )
     )
     search_queries: List[SearchQuery] = Field(
@@ -122,7 +123,6 @@ class ResearchAnalysisOutput(BaseModel):
             "Use remaining_secondary gaps for slots ONLY after remaining_primary is exhausted. "
             "Each SearchQuery: type, name, primary_identifier (required), "
             "secondary_identifier (only if needed), and 1 query string anchored to name + primary_identifier. "
-            "Empty list [] when both statuses are FULFILLED."
         ),
     )
 
